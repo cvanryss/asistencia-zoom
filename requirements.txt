@@ -1,1 +1,3 @@
-streamlit\npandas\nopenpyxl\n
+streamlit
+pandas
+openpyxl
