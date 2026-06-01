@@ -28,43 +28,105 @@ archivo = st.file_uploader(
     type=["csv"]
 )
 
+def detectar_inicio_participantes(archivo):
+    # Detecta la fila donde empieza la tabla real de participantes.
+    # Algunos reportes de Zoom traen primero una tabla resumen de la sesión.
+    archivo.seek(0)
+    lineas = archivo.read().decode("utf-8-sig", errors="replace").splitlines()
+
+    posibles_encabezados = [
+        "Nombre de usuario",
+        "Nombre (nombre original)",
+        "Nombre",
+    ]
+
+    for i, linea in enumerate(lineas):
+        if any(encabezado in linea for encabezado in posibles_encabezados) and "Duración (minutos)" in linea:
+            return i
+
+    return 0
+
 def leer_csv_zoom(archivo):
+    # Lee CSV de Zoom aunque tenga una tabla resumen antes del listado de participantes.
+    fila_inicio = detectar_inicio_participantes(archivo)
+
+    archivo.seek(0)
     try:
-        return pd.read_csv(archivo, encoding="utf-8-sig")
+        return pd.read_csv(archivo, encoding="utf-8-sig", skiprows=fila_inicio)
     except UnicodeDecodeError:
         archivo.seek(0)
-        return pd.read_csv(archivo, encoding="latin1")
+        return pd.read_csv(archivo, encoding="latin1", skiprows=fila_inicio)
+
+def encontrar_columna(df, opciones):
+    # Busca una columna entre varios nombres posibles.
+    for opcion in opciones:
+        if opcion in df.columns:
+            return opcion
+    return None
 
 def procesar_asistencia(df, minutos_minimos):
-    columnas_requeridas = ["Nombre de usuario", "Duración (minutos)"]
+    # Suma la duración por usuario y marca Presente/Ausente.
 
-    for columna in columnas_requeridas:
-        if columna not in df.columns:
-            st.error(f"El archivo no tiene la columna requerida: {columna}")
-            st.stop()
+    columna_nombre = encontrar_columna(
+        df,
+        [
+            "Nombre de usuario",
+            "Nombre (nombre original)",
+            "Nombre"
+        ]
+    )
 
-    if "E-mail de usuario" not in df.columns:
-        df["E-mail de usuario"] = ""
+    columna_email = encontrar_columna(
+        df,
+        [
+            "E-mail de usuario",
+            "Correo electrónico",
+            "Email",
+            "Correo"
+        ]
+    )
 
-    df["Duración (minutos)"] = pd.to_numeric(
-        df["Duración (minutos)"],
+    columna_duracion = encontrar_columna(
+        df,
+        [
+            "Duración (minutos)",
+            "Duracion (minutos)"
+        ]
+    )
+
+    if columna_nombre is None:
+        st.error("No encontré la columna de nombre del participante.")
+        st.write("Columnas detectadas:", list(df.columns))
+        st.stop()
+
+    if columna_duracion is None:
+        st.error("No encontré la columna de duración en minutos.")
+        st.write("Columnas detectadas:", list(df.columns))
+        st.stop()
+
+    if columna_email is None:
+        df["Email"] = ""
+        columna_email = "Email"
+
+    df[columna_duracion] = pd.to_numeric(
+        df[columna_duracion],
         errors="coerce"
     ).fillna(0)
 
     resultado = (
-        df.groupby(["Nombre de usuario", "E-mail de usuario"], dropna=False, as_index=False)
-          .agg({"Duración (minutos)": "sum"})
+        df.groupby([columna_nombre, columna_email], dropna=False, as_index=False)
+          .agg({columna_duracion: "sum"})
     )
 
-    resultado["Estado"] = resultado["Duración (minutos)"].apply(
+    resultado["Estado"] = resultado[columna_duracion].apply(
         lambda x: "Presente" if x >= minutos_minimos else "Ausente"
     )
 
     resultado = resultado.rename(
         columns={
-            "Nombre de usuario": "Nombre",
-            "E-mail de usuario": "Email",
-            "Duración (minutos)": "Tiempo total de conexión (minutos)"
+            columna_nombre: "Nombre",
+            columna_email: "Email",
+            columna_duracion: "Tiempo total de conexión (minutos)"
         }
     )
 
@@ -80,7 +142,6 @@ def convertir_a_excel(df):
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Asistencia")
-
         worksheet = writer.sheets["Asistencia"]
 
         for column_cells in worksheet.columns:
@@ -100,7 +161,7 @@ def convertir_a_excel(df):
 if archivo is not None:
     df = leer_csv_zoom(archivo)
 
-    with st.expander("Vista previa del archivo original"):
+    with st.expander("Vista previa del archivo leído"):
         st.dataframe(df.head(20), use_container_width=True)
 
     resultado = procesar_asistencia(df, minutos_minimos)
