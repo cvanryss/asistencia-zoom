@@ -1,6 +1,7 @@
 import pandas as pd
 import streamlit as st
 from io import BytesIO
+from datetime import datetime, time
 
 st.set_page_config(
     page_title="Asistencia Zoom",
@@ -10,11 +11,28 @@ st.set_page_config(
 
 st.title("✅ Procesador de asistencia Zoom")
 st.write(
-    "Sube un reporte CSV de Zoom y la app calculará el tiempo total de conexión "
-    "por usuario, marcando Presente o Ausente según el mínimo definido."
+    "Sube un reporte CSV de Zoom. La app calcula la asistencia real usando hora de entrada "
+    "y hora de salida, descontando los tiempos fuera de Zoom y el tiempo anterior al inicio oficial de clase."
 )
 
 st.sidebar.header("Configuración")
+
+hora_inicio_clase = st.sidebar.time_input(
+    "Hora oficial de inicio de clase",
+    value=time(19, 0)
+)
+
+usar_hora_termino = st.sidebar.checkbox(
+    "Definir hora oficial de término de clase",
+    value=False
+)
+
+hora_termino_clase = None
+if usar_hora_termino:
+    hora_termino_clase = st.sidebar.time_input(
+        "Hora oficial de término de clase",
+        value=time(21, 30)
+    )
 
 minutos_minimos = st.sidebar.number_input(
     "Minutos mínimos para quedar Presente",
@@ -29,28 +47,29 @@ archivo = st.file_uploader(
 )
 
 def detectar_inicio_participantes(archivo):
-    # Detecta la fila donde empieza la tabla real de participantes.
-    # Algunos reportes de Zoom traen primero una tabla resumen de la sesión.
     archivo.seek(0)
-    lineas = archivo.read().decode("utf-8-sig", errors="replace").splitlines()
-
-    posibles_encabezados = [
-        "Nombre de usuario",
-        "Nombre (nombre original)",
-        "Nombre",
-    ]
+    contenido = archivo.read().decode("utf-8-sig", errors="replace")
+    lineas = contenido.splitlines()
 
     for i, linea in enumerate(lineas):
-        if any(encabezado in linea for encabezado in posibles_encabezados) and "Duración (minutos)" in linea:
+        linea_lower = linea.lower()
+        tiene_nombre = (
+            "nombre de usuario" in linea_lower
+            or "nombre (nombre original)" in linea_lower
+            or linea_lower.startswith("nombre,")
+        )
+        tiene_entrada = "hora de entrada" in linea_lower
+        tiene_salida = "hora de salida" in linea_lower
+
+        if tiene_nombre and tiene_entrada and tiene_salida:
             return i
 
     return 0
 
 def leer_csv_zoom(archivo):
-    # Lee CSV de Zoom aunque tenga una tabla resumen antes del listado de participantes.
     fila_inicio = detectar_inicio_participantes(archivo)
-
     archivo.seek(0)
+
     try:
         return pd.read_csv(archivo, encoding="utf-8-sig", skiprows=fila_inicio)
     except UnicodeDecodeError:
@@ -58,40 +77,91 @@ def leer_csv_zoom(archivo):
         return pd.read_csv(archivo, encoding="latin1", skiprows=fila_inicio)
 
 def encontrar_columna(df, opciones):
-    # Busca una columna entre varios nombres posibles.
+    columnas_limpias = {str(c).strip(): c for c in df.columns}
+
     for opcion in opciones:
-        if opcion in df.columns:
-            return opcion
+        if opcion in columnas_limpias:
+            return columnas_limpias[opcion]
+
+    for columna_original in df.columns:
+        columna = str(columna_original).strip().lower()
+        for opcion in opciones:
+            if opcion.lower() in columna:
+                return columna_original
+
     return None
 
-def procesar_asistencia(df, minutos_minimos):
-    # Suma la duración por usuario y marca Presente/Ausente.
+def parsear_fechas(serie):
+    fechas = pd.to_datetime(serie, errors="coerce", dayfirst=True)
 
+    if fechas.isna().mean() > 0.5:
+        fechas = pd.to_datetime(serie, errors="coerce", dayfirst=False)
+
+    return fechas
+
+def apellido_orden(nombre):
+    if pd.isna(nombre):
+        return ""
+
+    texto = str(nombre).strip()
+
+    if "," in texto:
+        return texto.split(",")[0].strip().upper()
+
+    partes = texto.split()
+    if len(partes) == 0:
+        return ""
+
+    return partes[-1].upper()
+
+def unir_intervalos(intervalos):
+    if not intervalos:
+        return []
+
+    intervalos = sorted(intervalos, key=lambda x: x[0])
+    unidos = [intervalos[0]]
+
+    for inicio, fin in intervalos[1:]:
+        ultimo_inicio, ultimo_fin = unidos[-1]
+
+        if inicio <= ultimo_fin:
+            unidos[-1] = (ultimo_inicio, max(ultimo_fin, fin))
+        else:
+            unidos.append((inicio, fin))
+
+    return unidos
+
+def minutos_intervalos(intervalos):
+    total = 0
+    for inicio, fin in intervalos:
+        total += max(0, (fin - inicio).total_seconds() / 60)
+    return round(total, 1)
+
+def formatear_intervalos(intervalos):
+    textos = []
+    for inicio, fin in intervalos:
+        textos.append(f"{inicio.strftime('%H:%M:%S')} - {fin.strftime('%H:%M:%S')}")
+    return " | ".join(textos)
+
+def procesar_asistencia(df, minutos_minimos, hora_inicio_clase, hora_termino_clase):
     columna_nombre = encontrar_columna(
         df,
-        [
-            "Nombre de usuario",
-            "Nombre (nombre original)",
-            "Nombre"
-        ]
+        ["Nombre de usuario", "Nombre (nombre original)", "Nombre"]
     )
 
     columna_email = encontrar_columna(
         df,
-        [
-            "E-mail de usuario",
-            "Correo electrónico",
-            "Email",
-            "Correo"
-        ]
+        ["E-mail de usuario", "Correo electrónico", "Email", "Correo"]
     )
 
-    columna_duracion = encontrar_columna(
+    columna_entrada = encontrar_columna(
         df,
-        [
-            "Duración (minutos)",
-            "Duracion (minutos)"
-        ]
+        ["Hora de entrada", "Entrada"]
+    )
+
+    columna_salida = encontrar_columna(
+        df,
+        ["Hora de salida", "Salida"]
     )
 
     if columna_nombre is None:
@@ -99,8 +169,8 @@ def procesar_asistencia(df, minutos_minimos):
         st.write("Columnas detectadas:", list(df.columns))
         st.stop()
 
-    if columna_duracion is None:
-        st.error("No encontré la columna de duración en minutos.")
+    if columna_entrada is None or columna_salida is None:
+        st.error("No encontré las columnas de hora de entrada y/o hora de salida.")
         st.write("Columnas detectadas:", list(df.columns))
         st.stop()
 
@@ -108,53 +178,109 @@ def procesar_asistencia(df, minutos_minimos):
         df["Email"] = ""
         columna_email = "Email"
 
-    df[columna_duracion] = pd.to_numeric(
-        df[columna_duracion],
-        errors="coerce"
-    ).fillna(0)
+    df = df.copy()
 
-    resultado = (
-        df.groupby([columna_nombre, columna_email], dropna=False, as_index=False)
-          .agg({columna_duracion: "sum"})
-    )
+    df["Entrada_dt"] = parsear_fechas(df[columna_entrada])
+    df["Salida_dt"] = parsear_fechas(df[columna_salida])
 
-    resultado["Estado"] = resultado[columna_duracion].apply(
-        lambda x: "Presente" if x >= minutos_minimos else "Ausente"
-    )
+    df = df.dropna(subset=["Entrada_dt", "Salida_dt"])
+    df = df[df["Salida_dt"] > df["Entrada_dt"]]
 
-    resultado = resultado.rename(
-        columns={
-            columna_nombre: "Nombre",
-            columna_email: "Email",
-            columna_duracion: "Tiempo total de conexión (minutos)"
-        }
-    )
+    registros = []
+
+    for _, row in df.iterrows():
+        fecha_base = row["Entrada_dt"].date()
+        inicio_clase_dt = datetime.combine(fecha_base, hora_inicio_clase)
+
+        if hora_termino_clase is not None:
+            termino_clase_dt = datetime.combine(fecha_base, hora_termino_clase)
+            if termino_clase_dt <= inicio_clase_dt:
+                termino_clase_dt = termino_clase_dt + pd.Timedelta(days=1)
+        else:
+            termino_clase_dt = None
+
+        # Regla validada por coordinación:
+        # 1. No contar nada antes del inicio oficial.
+        # 2. Descontar tiempos fuera de Zoom.
+        # 3. Unir tramos superpuestos para no duplicar minutos.
+        inicio_real = max(row["Entrada_dt"], inicio_clase_dt)
+        fin_real = row["Salida_dt"]
+
+        if termino_clase_dt is not None:
+            fin_real = min(fin_real, termino_clase_dt)
+
+        if fin_real > inicio_real:
+            registros.append({
+                "Nombre": row[columna_nombre],
+                "Email": row[columna_email],
+                "Inicio considerado": inicio_real,
+                "Fin considerado": fin_real
+            })
+
+    if len(registros) == 0:
+        st.warning("No se encontraron conexiones válidas para calcular asistencia.")
+        st.stop()
+
+    conexiones = pd.DataFrame(registros)
+    filas_resultado = []
+
+    for (nombre, email), grupo in conexiones.groupby(["Nombre", "Email"], dropna=False):
+        intervalos = list(zip(grupo["Inicio considerado"], grupo["Fin considerado"]))
+        intervalos_unidos = unir_intervalos(intervalos)
+        minutos = minutos_intervalos(intervalos_unidos)
+
+        filas_resultado.append({
+            "Apellido orden": apellido_orden(nombre),
+            "Nombre": nombre,
+            "Email": email,
+            "Tiempo real de conexión (minutos)": minutos,
+            "Estado": "Presente" if minutos >= minutos_minimos else "Ausente",
+            "Tramos reales considerados": len(intervalos_unidos),
+            "Detalle de tramos": formatear_intervalos(intervalos_unidos)
+        })
+
+    resultado = pd.DataFrame(filas_resultado)
 
     resultado = resultado.sort_values(
-        ["Estado", "Nombre"],
-        ascending=[False, True]
+        ["Apellido orden", "Nombre"],
+        ascending=[True, True]
     )
 
-    return resultado
+    resultado = resultado[
+        [
+            "Nombre",
+            "Email",
+            "Tiempo real de conexión (minutos)",
+            "Estado",
+            "Tramos reales considerados",
+            "Detalle de tramos",
+            "Apellido orden"
+        ]
+    ]
 
-def convertir_a_excel(df):
+    return resultado, conexiones
+
+def convertir_a_excel(resultado, conexiones):
     output = BytesIO()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Asistencia")
-        worksheet = writer.sheets["Asistencia"]
+        resultado.to_excel(writer, index=False, sheet_name="Resumen asistencia")
+        conexiones.to_excel(writer, index=False, sheet_name="Conexiones consideradas")
 
-        for column_cells in worksheet.columns:
-            max_length = 0
-            column_letter = column_cells[0].column_letter
+        for sheet_name in writer.sheets:
+            worksheet = writer.sheets[sheet_name]
 
-            for cell in column_cells:
-                try:
-                    max_length = max(max_length, len(str(cell.value)))
-                except Exception:
-                    pass
+            for column_cells in worksheet.columns:
+                max_length = 0
+                column_letter = column_cells[0].column_letter
 
-            worksheet.column_dimensions[column_letter].width = max_length + 2
+                for cell in column_cells:
+                    try:
+                        max_length = max(max_length, len(str(cell.value)))
+                    except Exception:
+                        pass
+
+                worksheet.column_dimensions[column_letter].width = min(max_length + 2, 60)
 
     return output.getvalue()
 
@@ -162,9 +288,14 @@ if archivo is not None:
     df = leer_csv_zoom(archivo)
 
     with st.expander("Vista previa del archivo leído"):
-        st.dataframe(df.head(20), use_container_width=True)
+        st.dataframe(df.head(30), use_container_width=True)
 
-    resultado = procesar_asistencia(df, minutos_minimos)
+    resultado, conexiones = procesar_asistencia(
+        df=df,
+        minutos_minimos=minutos_minimos,
+        hora_inicio_clase=hora_inicio_clase,
+        hora_termino_clase=hora_termino_clase
+    )
 
     total_personas = len(resultado)
     presentes = (resultado["Estado"] == "Presente").sum()
@@ -177,9 +308,16 @@ if archivo is not None:
     col3.metric("Ausentes", ausentes)
 
     st.subheader("Resultado de asistencia")
+    st.caption(
+        "Criterio usado: se descuenta el tiempo anterior al inicio oficial de clase, "
+        "se descuentan los tiempos fuera de Zoom y se unen tramos superpuestos."
+    )
     st.dataframe(resultado, use_container_width=True)
 
-    excel = convertir_a_excel(resultado)
+    with st.expander("Ver conexiones consideradas"):
+        st.dataframe(conexiones, use_container_width=True)
+
+    excel = convertir_a_excel(resultado, conexiones)
     csv = resultado.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
 
     col_descarga_1, col_descarga_2 = st.columns(2)
