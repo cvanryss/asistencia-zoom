@@ -99,18 +99,31 @@ def parsear_fechas(serie):
 
     return fechas
 
-def apellido_orden(nombre):
+def obtener_primer_apellido(nombre):
+    """
+    Heurística para nombres chilenos:
+    - Si viene "Apellido, Nombre", usa lo anterior a la coma.
+    - Si tiene 4 o más palabras, asume que los dos últimos son apellidos y usa el penúltimo.
+      Ej: CAROLINA ANDREA CONCHA ACEVEDO -> CONCHA
+      Ej: FRANCISCA PAZ MENA ALAM -> MENA
+    - Si tiene 2 o 3 palabras, usa la última.
+      Ej: DIANA DONOSO -> DONOSO
+    """
     if pd.isna(nombre):
         return ""
 
-    texto = str(nombre).strip()
+    texto = " ".join(str(nombre).strip().split())
+
+    if not texto:
+        return ""
 
     if "," in texto:
         return texto.split(",")[0].strip().upper()
 
     partes = texto.split()
-    if len(partes) == 0:
-        return ""
+
+    if len(partes) >= 4:
+        return partes[-2].upper()
 
     return partes[-1].upper()
 
@@ -175,8 +188,8 @@ def procesar_asistencia(df, minutos_minimos, hora_inicio_clase, hora_termino_cla
         st.stop()
 
     if columna_email is None:
-        df["Email"] = ""
-        columna_email = "Email"
+        df["Email temporal"] = ""
+        columna_email = "Email temporal"
 
     df = df.copy()
 
@@ -199,10 +212,6 @@ def procesar_asistencia(df, minutos_minimos, hora_inicio_clase, hora_termino_cla
         else:
             termino_clase_dt = None
 
-        # Regla validada por coordinación:
-        # 1. No contar nada antes del inicio oficial.
-        # 2. Descontar tiempos fuera de Zoom.
-        # 3. Unir tramos superpuestos para no duplicar minutos.
         inicio_real = max(row["Entrada_dt"], inicio_clase_dt)
         fin_real = row["Salida_dt"]
 
@@ -212,7 +221,7 @@ def procesar_asistencia(df, minutos_minimos, hora_inicio_clase, hora_termino_cla
         if fin_real > inicio_real:
             registros.append({
                 "Nombre": row[columna_nombre],
-                "Email": row[columna_email],
+                "Email interno": row[columna_email],
                 "Inicio considerado": inicio_real,
                 "Fin considerado": fin_real
             })
@@ -224,15 +233,15 @@ def procesar_asistencia(df, minutos_minimos, hora_inicio_clase, hora_termino_cla
     conexiones = pd.DataFrame(registros)
     filas_resultado = []
 
-    for (nombre, email), grupo in conexiones.groupby(["Nombre", "Email"], dropna=False):
+    for (nombre, email), grupo in conexiones.groupby(["Nombre", "Email interno"], dropna=False):
         intervalos = list(zip(grupo["Inicio considerado"], grupo["Fin considerado"]))
         intervalos_unidos = unir_intervalos(intervalos)
         minutos = minutos_intervalos(intervalos_unidos)
+        apellido = obtener_primer_apellido(nombre)
 
         filas_resultado.append({
-            "Apellido orden": apellido_orden(nombre),
             "Nombre": nombre,
-            "Email": email,
+            "Apellido": apellido,
             "Tiempo real de conexión (minutos)": minutos,
             "Estado": "Presente" if minutos >= minutos_minimos else "Ausente",
             "Tramos reales considerados": len(intervalos_unidos),
@@ -242,23 +251,22 @@ def procesar_asistencia(df, minutos_minimos, hora_inicio_clase, hora_termino_cla
     resultado = pd.DataFrame(filas_resultado)
 
     resultado = resultado.sort_values(
-        ["Apellido orden", "Nombre"],
+        ["Apellido", "Nombre"],
         ascending=[True, True]
     )
 
     resultado = resultado[
         [
             "Nombre",
-            "Email",
+            "Apellido",
             "Tiempo real de conexión (minutos)",
             "Estado",
             "Tramos reales considerados",
-            "Detalle de tramos",
-            "Apellido orden"
+            "Detalle de tramos"
         ]
     ]
 
-    return resultado, conexiones
+    return resultado, conexiones.drop(columns=["Email interno"], errors="ignore")
 
 def convertir_a_excel(resultado, conexiones):
     output = BytesIO()
@@ -310,7 +318,8 @@ if archivo is not None:
     st.subheader("Resultado de asistencia")
     st.caption(
         "Criterio usado: se descuenta el tiempo anterior al inicio oficial de clase, "
-        "se descuentan los tiempos fuera de Zoom y se unen tramos superpuestos."
+        "se descuentan los tiempos fuera de Zoom y se unen tramos superpuestos. "
+        "El listado se ordena por primer apellido."
     )
     st.dataframe(resultado, use_container_width=True)
 
