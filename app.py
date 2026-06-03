@@ -21,8 +21,6 @@ programa = st.sidebar.text_input(
     value="Diplomado Neurociencia Aplicada al Liderazgo"
 )
 
-fecha_clase = st.sidebar.date_input("Fecha de clase")
-
 hora_inicio_clase = st.sidebar.time_input(
     "Hora oficial de inicio de clase",
     value=time(19, 0)
@@ -124,6 +122,17 @@ def parsear_fechas(serie):
     return fechas
 
 
+def detectar_fecha_clase(df, columna_entrada):
+    entradas = parsear_fechas(df[columna_entrada]).dropna()
+
+    if entradas.empty:
+        return None
+
+    # Si hay varias fechas por cruces de medianoche o registros raros, usa la fecha más frecuente.
+    fechas = entradas.dt.date
+    return fechas.mode().iloc[0]
+
+
 def obtener_apellido_para_ordenar(nombre, criterio):
     if pd.isna(nombre):
         return ""
@@ -187,7 +196,6 @@ def formatear_intervalos(intervalos):
 def procesar_asistencia(
     df,
     programa,
-    fecha_clase,
     minutos_minimos,
     hora_inicio_clase,
     hora_termino_clase,
@@ -215,6 +223,12 @@ def procesar_asistencia(
     df = df.copy()
     df["Entrada_dt"] = parsear_fechas(df[columna_entrada])
     df["Salida_dt"] = parsear_fechas(df[columna_salida])
+
+    fecha_clase = detectar_fecha_clase(df, columna_entrada)
+
+    if fecha_clase is None:
+        st.error("No pude detectar la fecha de clase desde el archivo.")
+        st.stop()
 
     df = df.dropna(subset=["Entrada_dt", "Salida_dt"])
     df = df[df["Salida_dt"] > df["Entrada_dt"]]
@@ -294,7 +308,7 @@ def procesar_asistencia(
 
     conexiones = conexiones.drop(columns=["Email interno"], errors="ignore")
 
-    return resultado, conexiones
+    return resultado, conexiones, fecha_clase
 
 
 def convertir_a_excel(resultado, conexiones, programa, fecha_clase):
@@ -334,22 +348,21 @@ def convertir_a_excel(resultado, conexiones, programa, fecha_clase):
 if archivo is not None:
     df = leer_csv_zoom(archivo)
 
-    st.info(
-        f"Programa: {programa} | Fecha clase: {fecha_clase.strftime('%d-%m-%Y')} | "
-        f"Inicio oficial: {hora_inicio_clase.strftime('%H:%M')}"
-    )
-
     with st.expander("Vista previa del archivo leído"):
         st.dataframe(df.head(30), use_container_width=True)
 
-    resultado, conexiones = procesar_asistencia(
+    resultado, conexiones, fecha_clase = procesar_asistencia(
         df=df,
         programa=programa,
-        fecha_clase=fecha_clase,
         minutos_minimos=minutos_minimos,
         hora_inicio_clase=hora_inicio_clase,
         hora_termino_clase=hora_termino_clase,
         criterio_apellido=criterio_apellido
+    )
+
+    st.info(
+        f"Programa: {programa} | Fecha detectada: {fecha_clase.strftime('%d-%m-%Y')} | "
+        f"Inicio oficial: {hora_inicio_clase.strftime('%H:%M')}"
     )
 
     total_personas = len(resultado)
@@ -365,7 +378,7 @@ if archivo is not None:
     st.caption(
         "Criterio usado: se descuenta el tiempo anterior al inicio oficial de clase, "
         "se descuentan los tiempos fuera de Zoom y se unen tramos superpuestos. "
-        "El tiempo se muestra como número entero."
+        "La fecha de clase se detecta automáticamente desde el archivo."
     )
     st.dataframe(resultado, use_container_width=True)
 
