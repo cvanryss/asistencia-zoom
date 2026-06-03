@@ -41,10 +41,21 @@ minutos_minimos = st.sidebar.number_input(
     step=5
 )
 
+criterio_apellido = st.sidebar.selectbox(
+    "Criterio para ordenar por apellido",
+    [
+        "Primer apellido: penúltima palabra",
+        "Segundo elemento del nombre",
+        "Ordenar por nombre completo"
+    ],
+    index=0
+)
+
 archivo = st.file_uploader(
     "Sube el archivo CSV exportado desde Zoom",
     type=["csv"]
 )
+
 
 def detectar_inicio_participantes(archivo):
     archivo.seek(0)
@@ -66,6 +77,7 @@ def detectar_inicio_participantes(archivo):
 
     return 0
 
+
 def leer_csv_zoom(archivo):
     fila_inicio = detectar_inicio_participantes(archivo)
     archivo.seek(0)
@@ -75,6 +87,7 @@ def leer_csv_zoom(archivo):
     except UnicodeDecodeError:
         archivo.seek(0)
         return pd.read_csv(archivo, encoding="latin1", skiprows=fila_inicio)
+
 
 def encontrar_columna(df, opciones):
     columnas_limpias = {str(c).strip(): c for c in df.columns}
@@ -91,6 +104,7 @@ def encontrar_columna(df, opciones):
 
     return None
 
+
 def parsear_fechas(serie):
     fechas = pd.to_datetime(serie, errors="coerce", dayfirst=True)
 
@@ -99,16 +113,8 @@ def parsear_fechas(serie):
 
     return fechas
 
-def obtener_primer_apellido(nombre):
-    """
-    Heurística para nombres chilenos:
-    - Si viene "Apellido, Nombre", usa lo anterior a la coma.
-    - Si tiene 4 o más palabras, asume que los dos últimos son apellidos y usa el penúltimo.
-      Ej: CAROLINA ANDREA CONCHA ACEVEDO -> CONCHA
-      Ej: FRANCISCA PAZ MENA ALAM -> MENA
-    - Si tiene 2 o 3 palabras, usa la última.
-      Ej: DIANA DONOSO -> DONOSO
-    """
+
+def obtener_apellido_para_ordenar(nombre, criterio):
     if pd.isna(nombre):
         return ""
 
@@ -122,10 +128,25 @@ def obtener_primer_apellido(nombre):
 
     partes = texto.split()
 
-    if len(partes) >= 4:
+    if criterio == "Ordenar por nombre completo":
+        return texto.upper()
+
+    if criterio == "Segundo elemento del nombre":
+        if len(partes) >= 2:
+            return partes[1].upper()
+        return partes[0].upper()
+
+    # Criterio por defecto: penúltima palabra.
+    # Ejemplos:
+    # ELIZABETH VILLAVICENCIO BERRIOS -> VILLAVICENCIO
+    # KARIN MELLADO DIAZ -> MELLADO
+    # MARCELA SILVA FISCHER -> SILVA
+    # CAROLINA ANDREA CONCHA ACEVEDO -> CONCHA
+    if len(partes) >= 2:
         return partes[-2].upper()
 
-    return partes[-1].upper()
+    return partes[0].upper()
+
 
 def unir_intervalos(intervalos):
     if not intervalos:
@@ -144,11 +165,14 @@ def unir_intervalos(intervalos):
 
     return unidos
 
+
 def minutos_intervalos(intervalos):
     total = 0
     for inicio, fin in intervalos:
         total += max(0, (fin - inicio).total_seconds() / 60)
-    return round(total, 1)
+
+    return int(round(total))
+
 
 def formatear_intervalos(intervalos):
     textos = []
@@ -156,7 +180,8 @@ def formatear_intervalos(intervalos):
         textos.append(f"{inicio.strftime('%H:%M:%S')} - {fin.strftime('%H:%M:%S')}")
     return " | ".join(textos)
 
-def procesar_asistencia(df, minutos_minimos, hora_inicio_clase, hora_termino_clase):
+
+def procesar_asistencia(df, minutos_minimos, hora_inicio_clase, hora_termino_clase, criterio_apellido):
     columna_nombre = encontrar_columna(
         df,
         ["Nombre de usuario", "Nombre (nombre original)", "Nombre"]
@@ -188,8 +213,8 @@ def procesar_asistencia(df, minutos_minimos, hora_inicio_clase, hora_termino_cla
         st.stop()
 
     if columna_email is None:
-        df["Email temporal"] = ""
-        columna_email = "Email temporal"
+        df["Email interno"] = ""
+        columna_email = "Email interno"
 
     df = df.copy()
 
@@ -237,7 +262,7 @@ def procesar_asistencia(df, minutos_minimos, hora_inicio_clase, hora_termino_cla
         intervalos = list(zip(grupo["Inicio considerado"], grupo["Fin considerado"]))
         intervalos_unidos = unir_intervalos(intervalos)
         minutos = minutos_intervalos(intervalos_unidos)
-        apellido = obtener_primer_apellido(nombre)
+        apellido = obtener_apellido_para_ordenar(nombre, criterio_apellido)
 
         filas_resultado.append({
             "Nombre": nombre,
@@ -250,10 +275,10 @@ def procesar_asistencia(df, minutos_minimos, hora_inicio_clase, hora_termino_cla
 
     resultado = pd.DataFrame(filas_resultado)
 
-    resultado = resultado.sort_values(
-        ["Apellido", "Nombre"],
-        ascending=[True, True]
-    )
+    if criterio_apellido == "Ordenar por nombre completo":
+        resultado = resultado.sort_values(["Nombre"], ascending=[True])
+    else:
+        resultado = resultado.sort_values(["Apellido", "Nombre"], ascending=[True, True])
 
     resultado = resultado[
         [
@@ -266,7 +291,10 @@ def procesar_asistencia(df, minutos_minimos, hora_inicio_clase, hora_termino_cla
         ]
     ]
 
-    return resultado, conexiones.drop(columns=["Email interno"], errors="ignore")
+    conexiones = conexiones.drop(columns=["Email interno"], errors="ignore")
+
+    return resultado, conexiones
+
 
 def convertir_a_excel(resultado, conexiones):
     output = BytesIO()
@@ -292,6 +320,7 @@ def convertir_a_excel(resultado, conexiones):
 
     return output.getvalue()
 
+
 if archivo is not None:
     df = leer_csv_zoom(archivo)
 
@@ -302,7 +331,8 @@ if archivo is not None:
         df=df,
         minutos_minimos=minutos_minimos,
         hora_inicio_clase=hora_inicio_clase,
-        hora_termino_clase=hora_termino_clase
+        hora_termino_clase=hora_termino_clase,
+        criterio_apellido=criterio_apellido
     )
 
     total_personas = len(resultado)
@@ -319,7 +349,7 @@ if archivo is not None:
     st.caption(
         "Criterio usado: se descuenta el tiempo anterior al inicio oficial de clase, "
         "se descuentan los tiempos fuera de Zoom y se unen tramos superpuestos. "
-        "El listado se ordena por primer apellido."
+        "El tiempo se muestra como número entero."
     )
     st.dataframe(resultado, use_container_width=True)
 
