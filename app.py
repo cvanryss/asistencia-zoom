@@ -1,4 +1,4 @@
-import re
+
 from io import BytesIO
 from datetime import datetime, time
 
@@ -15,11 +15,6 @@ st.write(
 )
 
 st.sidebar.header("Configuración de la clase")
-
-programa = st.sidebar.text_input(
-    "Programa",
-    value="Diplomado Neurociencia Aplicada al Liderazgo"
-)
 
 hora_inicio_clase = st.sidebar.time_input(
     "Hora oficial de inicio de clase",
@@ -56,13 +51,6 @@ criterio_apellido = st.sidebar.selectbox(
 )
 
 archivo = st.file_uploader("Sube el archivo CSV exportado desde Zoom", type=["csv"])
-
-
-def limpiar_nombre_archivo(texto):
-    texto = str(texto).strip()
-    texto = re.sub(r"[^A-Za-z0-9ÁÉÍÓÚáéíóúÑñ_-]+", "_", texto)
-    texto = re.sub(r"_+", "_", texto)
-    return texto.strip("_")[:80] or "programa"
 
 
 def detectar_inicio_participantes(archivo):
@@ -128,7 +116,6 @@ def detectar_fecha_clase(df, columna_entrada):
     if entradas.empty:
         return None
 
-    # Si hay varias fechas por cruces de medianoche o registros raros, usa la fecha más frecuente.
     fechas = entradas.dt.date
     return fechas.mode().iloc[0]
 
@@ -186,16 +173,8 @@ def minutos_intervalos(intervalos):
     return int(round(total))
 
 
-def formatear_intervalos(intervalos):
-    textos = []
-    for inicio, fin in intervalos:
-        textos.append(f"{inicio.strftime('%H:%M:%S')} - {fin.strftime('%H:%M:%S')}")
-    return " | ".join(textos)
-
-
 def procesar_asistencia(
     df,
-    programa,
     minutos_minimos,
     hora_inicio_clase,
     hora_termino_clase,
@@ -254,8 +233,6 @@ def procesar_asistencia(
 
         if fin_real > inicio_real:
             registros.append({
-                "Programa": programa,
-                "Fecha Clase": fecha_clase.strftime("%d-%m-%Y"),
                 "Nombre": row[columna_nombre],
                 "Email interno": row[columna_email],
                 "Inicio considerado": inicio_real,
@@ -276,14 +253,11 @@ def procesar_asistencia(
         apellido = obtener_apellido_para_ordenar(nombre, criterio_apellido)
 
         filas_resultado.append({
-            "Programa": programa,
-            "Fecha Clase": fecha_clase.strftime("%d-%m-%Y"),
             "Nombre": nombre,
             "Apellido": apellido,
             "Tiempo real de conexión (minutos)": minutos,
             "Estado": "Presente" if minutos >= minutos_minimos else "Ausente",
-            "Tramos reales considerados": len(intervalos_unidos),
-            "Detalle de tramos": formatear_intervalos(intervalos_unidos)
+            "Fecha Clase": fecha_clase.strftime("%d-%m-%Y")
         })
 
     resultado = pd.DataFrame(filas_resultado)
@@ -295,14 +269,11 @@ def procesar_asistencia(
 
     resultado = resultado[
         [
-            "Programa",
-            "Fecha Clase",
             "Nombre",
             "Apellido",
             "Tiempo real de conexión (minutos)",
             "Estado",
-            "Tramos reales considerados",
-            "Detalle de tramos"
+            "Fecha Clase"
         ]
     ]
 
@@ -311,13 +282,12 @@ def procesar_asistencia(
     return resultado, conexiones, fecha_clase
 
 
-def convertir_a_excel(resultado, conexiones, programa, fecha_clase):
+def convertir_a_excel(resultado, fecha_clase):
     output = BytesIO()
 
     resumen = pd.DataFrame({
-        "Campo": ["Programa", "Fecha clase", "Total usuarios", "Presentes", "Ausentes"],
+        "Campo": ["Fecha clase", "Total usuarios", "Presentes", "Ausentes"],
         "Valor": [
-            programa,
             fecha_clase.strftime("%d-%m-%Y"),
             len(resultado),
             int((resultado["Estado"] == "Presente").sum()),
@@ -328,7 +298,6 @@ def convertir_a_excel(resultado, conexiones, programa, fecha_clase):
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         resumen.to_excel(writer, index=False, sheet_name="Resumen general")
         resultado.to_excel(writer, index=False, sheet_name="Resumen asistencia")
-        conexiones.to_excel(writer, index=False, sheet_name="Conexiones consideradas")
 
         for sheet_name in writer.sheets:
             worksheet = writer.sheets[sheet_name]
@@ -340,7 +309,7 @@ def convertir_a_excel(resultado, conexiones, programa, fecha_clase):
                         max_length = max(max_length, len(str(cell.value)))
                     except Exception:
                         pass
-                worksheet.column_dimensions[column_letter].width = min(max_length + 2, 60)
+                worksheet.column_dimensions[column_letter].width = min(max_length + 2, 45)
 
     return output.getvalue()
 
@@ -353,7 +322,6 @@ if archivo is not None:
 
     resultado, conexiones, fecha_clase = procesar_asistencia(
         df=df,
-        programa=programa,
         minutos_minimos=minutos_minimos,
         hora_inicio_clase=hora_inicio_clase,
         hora_termino_clase=hora_termino_clase,
@@ -361,7 +329,7 @@ if archivo is not None:
     )
 
     st.info(
-        f"Programa: {programa} | Fecha detectada: {fecha_clase.strftime('%d-%m-%Y')} | "
+        f"Fecha detectada: {fecha_clase.strftime('%d-%m-%Y')} | "
         f"Inicio oficial: {hora_inicio_clase.strftime('%H:%M')}"
     )
 
@@ -382,13 +350,9 @@ if archivo is not None:
     )
     st.dataframe(resultado, use_container_width=True)
 
-    with st.expander("Ver conexiones consideradas"):
-        st.dataframe(conexiones, use_container_width=True)
-
-    excel = convertir_a_excel(resultado, conexiones, programa, fecha_clase)
+    excel = convertir_a_excel(resultado, fecha_clase)
     csv = resultado.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
 
-    programa_archivo = limpiar_nombre_archivo(programa)
     fecha_archivo = fecha_clase.strftime("%Y-%m-%d")
 
     col_descarga_1, col_descarga_2 = st.columns(2)
@@ -397,7 +361,7 @@ if archivo is not None:
         st.download_button(
             label="⬇️ Descargar Excel",
             data=excel,
-            file_name=f"{programa_archivo}_{fecha_archivo}_asistencia.xlsx",
+            file_name=f"asistencia_{fecha_archivo}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
@@ -405,7 +369,7 @@ if archivo is not None:
         st.download_button(
             label="⬇️ Descargar CSV",
             data=csv,
-            file_name=f"{programa_archivo}_{fecha_archivo}_asistencia.csv",
+            file_name=f"asistencia_{fecha_archivo}.csv",
             mime="text/csv"
         )
 
